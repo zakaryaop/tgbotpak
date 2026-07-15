@@ -1,20 +1,53 @@
-import telebot
+import requests
 import json
 import sqlite3
 import random
 import string
 import time
 from datetime import datetime, timedelta
-import threading
-import os
+from flask import Flask, request, jsonify
 
 # ============================================
 # CONFIGURATION
 # ============================================
-BOT_TOKEN = "8921411956:AAFJihWjWC1SNDJBiQZj36LmHaRIP8XQ7Ls"  # Change this
-ADMIN_IDS = [5130475597, 5130475597]  # Your Telegram IDs
-PRICE = 5  # Price in USD or your currency
-KEY_EXPIRY_DAYS = 7  # Days key is valid
+BOT_TOKEN = "8921411956:AAFJihWjWC1SNDJBiQZj36LmHaRIP8XQ7Ls"  # Get from @BotFather
+ADMIN_IDS = [5130475597]  # Your Telegram ID
+PRICE = 5
+KEY_EXPIRY_DAYS = 30
+
+# ============================================
+# TELEGRAM API FUNCTIONS (No telebot library)
+# ============================================
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+def send_message(chat_id, text, parse_mode=None, reply_markup=None):
+    """Send message using Telegram API"""
+    url = f"{TELEGRAM_API}/sendMessage"
+    data = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": parse_mode or "HTML"
+    }
+    if reply_markup:
+        data["reply_markup"] = reply_markup
+    response = requests.post(url, json=data)
+    return response.json()
+
+def send_inline_keyboard(chat_id, text, buttons):
+    """Send message with inline keyboard"""
+    reply_markup = {
+        "inline_keyboard": buttons
+    }
+    return send_message(chat_id, text, "HTML", json.dumps(reply_markup))
+
+def get_updates(offset=None):
+    """Get new messages"""
+    url = f"{TELEGRAM_API}/getUpdates"
+    data = {}
+    if offset:
+        data["offset"] = offset
+    response = requests.get(url, params=data)
+    return response.json()
 
 # ============================================
 # DATABASE SETUP
@@ -50,10 +83,10 @@ def init_db():
 init_db()
 
 # ============================================
-# KEY GENERATION FUNCTIONS
+# KEY FUNCTIONS
 # ============================================
 def generate_key():
-    """Generate unique key format: XXXX-XXXX-XXXX-XXXX"""
+    """Generate unique key"""
     parts = []
     for i in range(4):
         part = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
@@ -61,11 +94,9 @@ def generate_key():
     return '-'.join(parts)
 
 def generate_order_id():
-    """Generate order ID"""
     return 'ORD-' + ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
 def save_key_to_db(key, user_id, days_valid=KEY_EXPIRY_DAYS):
-    """Save key to database"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     buy_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -75,18 +106,7 @@ def save_key_to_db(key, user_id, days_valid=KEY_EXPIRY_DAYS):
     conn.commit()
     conn.close()
 
-def save_user_to_db(user_id, username, first_name, last_name):
-    """Save user to database"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    registered_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("INSERT OR IGNORE INTO users (user_id, username, first_name, last_name, registered_date) VALUES (?, ?, ?, ?, ?)",
-              (user_id, username, first_name, last_name, registered_date))
-    conn.commit()
-    conn.close()
-
 def get_user_keys(user_id):
-    """Get all keys for a user"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT key, buy_date, expiry_date, status FROM keys WHERE user_id = ? ORDER BY buy_date DESC", (user_id,))
@@ -95,7 +115,6 @@ def get_user_keys(user_id):
     return keys
 
 def check_key_validity(key):
-    """Check if key is valid and not expired"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT status, expiry_date FROM keys WHERE key = ?", (key,))
@@ -110,7 +129,6 @@ def check_key_validity(key):
     if status != 'active':
         return False, "Key is inactive or revoked"
     
-    # Check expiry
     expiry = datetime.strptime(expiry_date, "%Y-%m-%d %H:%M:%S")
     if datetime.now() > expiry:
         return False, "Key has expired"
@@ -118,7 +136,6 @@ def check_key_validity(key):
     return True, "Key is valid"
 
 def activate_device(key, device_id):
-    """Activate key for a device"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("UPDATE keys SET device_id = ? WHERE key = ?", (device_id, key))
@@ -126,7 +143,6 @@ def activate_device(key, device_id):
     conn.close()
 
 def get_key_info(key):
-    """Get key information"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT user_id, buy_date, expiry_date, status, device_id FROM keys WHERE key = ?", (key,))
@@ -134,37 +150,42 @@ def get_key_info(key):
     conn.close()
     return result
 
-# ============================================
-# BOT COMMANDS
-# ============================================
-bot = telebot.TeleBot(BOT_TOKEN)
+def save_user(user_id, username, first_name, last_name):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    registered_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("INSERT OR IGNORE INTO users (user_id, username, first_name, last_name, registered_date) VALUES (?, ?, ?, ?, ?)",
+              (user_id, username or "", first_name or "", last_name or "", registered_date))
+    conn.commit()
+    conn.close()
 
-@bot.message_handler(commands=['start'])
-def start(message):
-    user_id = message.from_user.id
-    username = message.from_user.username or "NoUsername"
-    first_name = message.from_user.first_name or "NoName"
-    last_name = message.from_user.last_name or ""
+# ============================================
+# COMMAND HANDLERS
+# ============================================
+def handle_start(message):
+    user_id = message['from']['id']
+    username = message['from'].get('username', '')
+    first_name = message['from'].get('first_name', '')
+    last_name = message['from'].get('last_name', '')
     
-    # Save user
-    save_user_to_db(user_id, username, first_name, last_name)
+    save_user(user_id, username, first_name, last_name)
     
-    welcome_text = f"""
-🔐 *VIP MOD KEY SHOP*
+    text = f"""
+🔐 <b>VIP MOD KEY SHOP</b>
 
 Welcome {first_name}! 🎉
 
 ━━━━━━━━━━━━━━━━━━━━━━━
-💎 *What is this?*
+💎 <b>What is this?</b>
 Premium VIP Mod for PUBG Mobile
 Unlock all features: ESP, Aimbot, Skins
 
 ━━━━━━━━━━━━━━━━━━━━━━━
-💰 *Price: ${PRICE}*
-⏰ *Validity: {KEY_EXPIRY_DAYS} days*
+💰 <b>Price: ${PRICE}</b>
+⏰ <b>Validity: {KEY_EXPIRY_DAYS} days</b>
 ━━━━━━━━━━━━━━━━━━━━━━━
 
-📌 *Commands:*
+📌 <b>Commands:</b>
 /buy - Purchase a new key
 /mykeys - View your keys
 /check KEY - Check key validity
@@ -172,19 +193,20 @@ Unlock all features: ESP, Aimbot, Skins
 /help - Help & support
 
 ━━━━━━━━━━━━━━━━━━━━━━━
-📱 *Contact:* @zakarya_op
-💬 *WhatsApp:* +92 319 2530306
+📱 <b>Contact:</b> @zakarya_op
+💬 <b>WhatsApp:</b> +92 319 2530306
 """
-    bot.reply_to(message, welcome_text, parse_mode='Markdown')
-
-@bot.message_handler(commands=['buy'])
-def buy_key(message):
-    user_id = message.from_user.id
-    username = message.from_user.username or "NoUsername"
-    first_name = message.from_user.first_name or "NoName"
-    last_name = message.from_user.last_name or ""
     
-    save_user_to_db(user_id, username, first_name, last_name)
+    buttons = [
+        [{"text": "💰 Buy Key", "callback_data": "buy"}],
+        [{"text": "🔑 My Keys", "callback_data": "mykeys"}],
+        [{"text": "📱 Contact Support", "url": "https://t.me/zakarya_op"}]
+    ]
+    
+    send_inline_keyboard(user_id, text, buttons)
+
+def handle_buy(message):
+    user_id = message['from']['id']
     
     # Generate key
     key = generate_key()
@@ -201,113 +223,104 @@ def buy_key(message):
     conn.commit()
     conn.close()
     
-    buy_text = f"""
-✅ *KEY GENERATED SUCCESSFULLY!*
+    text = f"""
+✅ <b>KEY GENERATED SUCCESSFULLY!</b>
 
 ━━━━━━━━━━━━━━━━━━━━━━━
-🔑 *Your Key:*
-`{key}`
+🔑 <b>Your Key:</b>
+<code>{key}</code>
 
-⏰ *Valid for: {KEY_EXPIRY_DAYS} days*
-📅 *Expires: {(datetime.now() + timedelta(days=KEY_EXPIRY_DAYS)).strftime('%Y-%m-%d')}*
+⏰ <b>Valid for: {KEY_EXPIRY_DAYS} days</b>
+📅 <b>Expires: {(datetime.now() + timedelta(days=KEY_EXPIRY_DAYS)).strftime('%Y-%m-%d')}</b>
 ━━━━━━━━━━━━━━━━━━━━━━━
 
-📌 *How to use:*
+📌 <b>How to use:</b>
 1. Open PUBG Mobile
 2. Go to Settings → Mod Menu
-3. Enter key: `{key}`
+3. Enter key: <code>{key}</code>
 4. Enjoy VIP features! 🎮
 
 ━━━━━━━━━━━━━━━━━━━━━━━
-⚠️ *Note:* Key is one-time use
+⚠️ <b>Note:</b> Key is one-time use
 Keep your key safe!
 
 📱 @zakarya_op
 💬 +92 319 2530306
 """
-    bot.reply_to(message, buy_text, parse_mode='Markdown')
     
-    # Send private key to user (optional)
-    try:
-        bot.send_message(user_id, f"🔑 Your key: `{key}`", parse_mode='Markdown')
-    except:
-        pass
+    send_message(user_id, text, "HTML")
 
-@bot.message_handler(commands=['mykeys'])
-def my_keys(message):
-    user_id = message.from_user.id
+def handle_mykeys(message):
+    user_id = message['from']['id']
     keys = get_user_keys(user_id)
     
     if not keys:
-        bot.reply_to(message, "❌ You don't have any keys yet!\nUse /buy to purchase one.")
+        send_message(user_id, "❌ You don't have any keys yet!\nUse /buy to purchase one.")
         return
     
-    response = "🔐 *Your Keys:*\n━━━━━━━━━━━━━━━━━━━━━━━\n"
+    text = "🔐 <b>Your Keys:</b>\n━━━━━━━━━━━━━━━━━━━━━━━\n"
     for key, buy_date, expiry_date, status in keys:
         status_emoji = "✅" if status == "active" else "❌"
-        response += f"{status_emoji} `{key}`\n"
-        response += f"   Expires: {expiry_date}\n\n"
+        text += f"{status_emoji} <code>{key}</code>\n"
+        text += f"   Expires: {expiry_date}\n\n"
     
-    response += "━━━━━━━━━━━━━━━━━━━━━━━\n"
-    response += "Use /buy to get more keys!"
+    text += "━━━━━━━━━━━━━━━━━━━━━━━\n"
+    text += "Use /buy to get more keys!"
     
-    bot.reply_to(message, response, parse_mode='Markdown')
+    send_message(user_id, text, "HTML")
 
-@bot.message_handler(commands=['check'])
-def check_key(message):
-    try:
-        key = message.text.split()[1]
-    except:
-        bot.reply_to(message, "❌ Usage: /check YOUR_KEY")
+def handle_check(message):
+    parts = message.get('text', '').split()
+    if len(parts) < 2:
+        send_message(message['from']['id'], "❌ Usage: /check YOUR_KEY")
         return
     
+    key = parts[1]
     valid, msg = check_key_validity(key)
     
     if valid:
         info = get_key_info(key)
         if info:
             user_id, buy_date, expiry_date, status, device_id = info
-            check_text = f"""
-✅ *Key is VALID!*
+            text = f"""
+✅ <b>Key is VALID!</b>
 
 ━━━━━━━━━━━━━━━━━━━━━━━
-🔑 *Key:* `{key}`
-📅 *Bought:* {buy_date}
-⏰ *Expires:* {expiry_date}
-📱 *Device:* {device_id if device_id else 'Not activated'}
+🔑 <b>Key:</b> <code>{key}</code>
+📅 <b>Bought:</b> {buy_date}
+⏰ <b>Expires:</b> {expiry_date}
+📱 <b>Device:</b> {device_id if device_id else 'Not activated'}
 ━━━━━━━━━━━━━━━━━━━━━━━
 """
-            bot.reply_to(message, check_text, parse_mode='Markdown')
+            send_message(message['from']['id'], text, "HTML")
         else:
-            bot.reply_to(message, "✅ Key is valid!")
+            send_message(message['from']['id'], "✅ Key is valid!")
     else:
-        bot.reply_to(message, f"❌ {msg}")
+        send_message(message['from']['id'], f"❌ {msg}")
 
-@bot.message_handler(commands=['status'])
-def status(message):
-    user_id = message.from_user.id
+def handle_status(message):
+    user_id = message['from']['id']
     keys = get_user_keys(user_id)
     active_keys = [k for k in keys if k[3] == 'active']
     
-    status_text = f"""
-📊 *Account Status*
+    text = f"""
+📊 <b>Account Status</b>
 
 ━━━━━━━━━━━━━━━━━━━━━━━
-👤 *User ID:* `{user_id}`
-🔑 *Total Keys:* {len(keys)}
-✅ *Active Keys:* {len(active_keys)}
-💰 *Total Spent:* ${len(keys) * PRICE}
+👤 <b>User ID:</b> <code>{user_id}</code>
+🔑 <b>Total Keys:</b> {len(keys)}
+✅ <b>Active Keys:</b> {len(active_keys)}
+💰 <b>Total Spent:</b> ${len(keys) * PRICE}
 ━━━━━━━━━━━━━━━━━━━━━━━
 """
-    bot.reply_to(message, status_text, parse_mode='Markdown')
+    send_message(message['from']['id'], text, "HTML")
 
-@bot.message_handler(commands=['help'])
-def help_command(message):
-    help_text = """
-📖 *Help & Support*
+def handle_help(message):
+    text = """
+📖 <b>Help & Support</b>
 
 ━━━━━━━━━━━━━━━━━━━━━━━
-*Commands:*
+<b>Commands:</b>
 
 /buy - Purchase VIP key
 /mykeys - View your keys
@@ -316,7 +329,7 @@ def help_command(message):
 /help - This help menu
 
 ━━━━━━━━━━━━━━━━━━━━━━━
-*How to use key:*
+<b>How to use key:</b>
 
 1. Copy your key from /buy
 2. Open PUBG Mobile
@@ -324,188 +337,111 @@ def help_command(message):
 4. Paste and verify
 
 ━━━━━━━━━━━━━━━━━━━━━━━
-*Support:*
+<b>Support:</b>
 
 📱 Telegram: @zakarya_op
 💬 WhatsApp: +92 319 2530306
 ━━━━━━━━━━━━━━━━━━━━━━━
 """
-    bot.reply_to(message, help_text, parse_mode='Markdown')
+    send_message(message['from']['id'], text, "HTML")
 
 # ============================================
-# ADMIN COMMANDS
+# WEBHOOK / POLLING
 # ============================================
-@bot.message_handler(commands=['admin'])
-def admin_panel(message):
-    if message.from_user.id not in ADMIN_IDS:
-        bot.reply_to(message, "❌ Unauthorized!")
-        return
+def process_updates():
+    """Process incoming updates"""
+    last_update_id = 0
     
-    admin_text = """
-🔐 *Admin Panel*
-
-━━━━━━━━━━━━━━━━━━━━━━━
-*Commands:*
-
-/admin_revoke KEY - Revoke a key
-/admin_extend KEY DAYS - Extend key validity
-/admin_stats - View stats
-/admin_users - List all users
-/admin_broadcast MSG - Send broadcast
-
-━━━━━━━━━━━━━━━━━━━━━━━
-"""
-    bot.reply_to(message, admin_text, parse_mode='Markdown')
-
-@bot.message_handler(commands=['admin_stats'])
-def admin_stats(message):
-    if message.from_user.id not in ADMIN_IDS:
-        bot.reply_to(message, "❌ Unauthorized!")
-        return
-    
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    
-    c.execute("SELECT COUNT(*) FROM keys")
-    total_keys = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM keys WHERE status = 'active'")
-    active_keys = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM users")
-    total_users = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM orders")
-    total_orders = c.fetchone()[0]
-    
-    c.execute("SELECT SUM(amount) FROM orders WHERE payment_status = 'completed'")
-    total_revenue = c.fetchone()[0] or 0
-    
-    conn.close()
-    
-    stats_text = f"""
-📊 *Server Statistics*
-
-━━━━━━━━━━━━━━━━━━━━━━━
-👥 *Total Users:* {total_users}
-🔑 *Total Keys:* {total_keys}
-✅ *Active Keys:* {active_keys}
-📦 *Total Orders:* {total_orders}
-💰 *Revenue:* ${total_revenue:.2f}
-━━━━━━━━━━━━━━━━━━━━━━━
-"""
-    bot.reply_to(message, stats_text, parse_mode='Markdown')
-
-@bot.message_handler(commands=['admin_revoke'])
-def admin_revoke(message):
-    if message.from_user.id not in ADMIN_IDS:
-        bot.reply_to(message, "❌ Unauthorized!")
-        return
-    
-    try:
-        key = message.text.split()[1]
-    except:
-        bot.reply_to(message, "❌ Usage: /admin_revoke KEY")
-        return
-    
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("UPDATE keys SET status = 'revoked' WHERE key = ?", (key,))
-    conn.commit()
-    conn.close()
-    
-    bot.reply_to(message, f"✅ Key `{key}` has been revoked!", parse_mode='Markdown')
-
-@bot.message_handler(commands=['admin_extend'])
-def admin_extend(message):
-    if message.from_user.id not in ADMIN_IDS:
-        bot.reply_to(message, "❌ Unauthorized!")
-        return
-    
-    try:
-        parts = message.text.split()
-        key = parts[1]
-        days = int(parts[2])
-    except:
-        bot.reply_to(message, "❌ Usage: /admin_extend KEY DAYS")
-        return
-    
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    new_expiry = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("UPDATE keys SET expiry_date = ? WHERE key = ?", (new_expiry, key))
-    conn.commit()
-    conn.close()
-    
-    bot.reply_to(message, f"✅ Key `{key}` extended by {days} days!", parse_mode='Markdown')
-
-@bot.message_handler(commands=['admin_broadcast'])
-def admin_broadcast(message):
-    if message.from_user.id not in ADMIN_IDS:
-        bot.reply_to(message, "❌ Unauthorized!")
-        return
-    
-    try:
-        msg = message.text.split(' ', 1)[1]
-    except:
-        bot.reply_to(message, "❌ Usage: /admin_broadcast MESSAGE")
-        return
-    
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT user_id FROM users")
-    users = c.fetchall()
-    conn.close()
-    
-    sent = 0
-    for user in users:
+    while True:
         try:
-            bot.send_message(user[0], f"📢 *Broadcast from Admin:*\n\n{msg}", parse_mode='Markdown')
-            sent += 1
-        except:
-            pass
-    
-    bot.reply_to(message, f"✅ Broadcast sent to {sent} users!")
+            updates = get_updates(last_update_id + 1)
+            
+            if 'result' in updates:
+                for update in updates['result']:
+                    last_update_id = update['update_id']
+                    
+                    # Handle messages
+                    if 'message' in update:
+                        msg = update['message']
+                        text = msg.get('text', '')
+                        chat_id = msg['chat']['id']
+                        
+                        if text.startswith('/start'):
+                            handle_start(msg)
+                        elif text.startswith('/buy'):
+                            handle_buy(msg)
+                        elif text.startswith('/mykeys'):
+                            handle_mykeys(msg)
+                        elif text.startswith('/check'):
+                            handle_check(msg)
+                        elif text.startswith('/status'):
+                            handle_status(msg)
+                        elif text.startswith('/help'):
+                            handle_help(msg)
+                        else:
+                            send_message(chat_id, "❌ Unknown command. Use /help for available commands.")
+                    
+                    # Handle callback queries
+                    elif 'callback_query' in update:
+                        callback = update['callback_query']
+                        data = callback['data']
+                        chat_id = callback['message']['chat']['id']
+                        
+                        if data == 'buy':
+                            # Simulate /buy command
+                            handle_buy({'from': {'id': chat_id}})
+                        elif data == 'mykeys':
+                            handle_mykeys({'from': {'id': chat_id}})
+            
+            time.sleep(1)
+            
+        except Exception as e:
+            print(f"Error: {e}")
+            time.sleep(5)
 
 # ============================================
-# API ENDPOINT FOR LUA (HTTP Server)
+# FLASK API SERVER (For Lua Verification)
 # ============================================
-from flask import Flask, request, jsonify
-
 app = Flask(__name__)
 
 @app.route('/api/verify', methods=['POST'])
 def verify_key():
-    data = request.json
-    key = data.get('key', '')
-    device_id = data.get('device_id', '')
-    
-    valid, msg = check_key_validity(key)
-    
-    if valid:
-        # Activate device if not already
-        info = get_key_info(key)
-        if info:
-            user_id, buy_date, expiry_date, status, device = info
-            if device == '':
-                activate_device(key, device_id)
-            return jsonify({
-                'status': 'success',
-                'valid': True,
-                'message': 'Key is valid',
-                'expiry': expiry_date,
-                'user_id': user_id
-            })
-    
-    return jsonify({
-        'status': 'error',
-        'valid': False,
-        'message': msg
-    })
+    try:
+        data = request.json
+        key = data.get('key', '')
+        device_id = data.get('device_id', '')
+        
+        valid, msg = check_key_validity(key)
+        
+        if valid:
+            info = get_key_info(key)
+            if info:
+                user_id, buy_date, expiry_date, status, device = info
+                if device == '':
+                    activate_device(key, device_id)
+                return jsonify({
+                    'status': 'success',
+                    'valid': True,
+                    'message': 'Key is valid',
+                    'expiry': expiry_date,
+                    'user_id': user_id
+                })
+        
+        return jsonify({
+            'status': 'error',
+            'valid': False,
+            'message': msg
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'valid': False,
+            'message': str(e)
+        })
 
 @app.route('/api/generate', methods=['POST'])
 def generate_key_api():
-    # For admin use only
     auth = request.headers.get('Authorization')
     if auth != 'ADMIN_SECRET':
         return jsonify({'error': 'Unauthorized'}), 401
@@ -523,25 +459,24 @@ def generate_key_api():
         'expiry': (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     })
 
-# ============================================
-# START BOT AND API SERVER
-# ============================================
-def run_bot():
-    print("🤖 Bot is running...")
-    bot.infinity_polling()
+@app.route('/')
+def home():
+    return "🔐 VIP Key System is running!"
 
-def run_api():
-    print("🌐 API server running on http://0.0.0.0:5000")
-    app.run(host='0.0.0.0', port=5000, debug=False)
-
-# Run both in separate threads
+# ============================================
+# START BOT
+# ============================================
 if __name__ == "__main__":
-    bot_thread = threading.Thread(target=run_bot)
+    import threading
+    
+    # Start bot polling in background
+    bot_thread = threading.Thread(target=process_updates)
+    bot_thread.daemon = True
     bot_thread.start()
     
-    api_thread = threading.Thread(target=run_api)
-    api_thread.start()
-    
-    print("✅ System is ready!")
+    print("🤖 Bot is running with polling...")
+    print("🌐 API server running on http://0.0.0.0:5000")
     print("📱 Bot: @YOUR_BOT_USERNAME")
-    print("🌐 API: http://YOUR_IP:5000/api/verify")
+    
+    # Start Flask server
+    app.run(host='0.0.0.0', port=5000, debug=False)
