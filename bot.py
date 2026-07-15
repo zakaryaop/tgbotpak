@@ -1,40 +1,419 @@
-# ============================================
-# 🔐 REDZONE ULTIMATE BOT v4.0
-# Complete Telegram Bot + Key System Integration
-# ============================================
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-import os
+import hashlib
+import time
 import json
 import sqlite3
-import random
-import string
-import time
-import hashlib
-import threading
+import logging
 from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
-# Try to import, fallback if not available
-try:
-    import requests
-except ImportError:
-    import subprocess
-    subprocess.check_call(['pip', 'install', 'requests'])
-    import requests
+# ========== CONFIGURATION ==========
+BOT_TOKEN = "8921411956:AAFisybXC9poUcsLimEuJ6CwULISj-IgS7M"  # @BotFather se lo
+ADMIN_IDS = [5130475597, 5130475597]  # Admin Telegram IDs
+SECRET = "RedZone_PureLua_Offline_Auth_2026!"  # Lua script se match karna chahiye
 
-try:
-    from flask import Flask, request, jsonify
-except ImportError:
-    import subprocess
-    subprocess.check_call(['pip', 'install', 'flask'])
-    from flask import Flask, request, jsonify
+# ========== DATABASE SETUP ==========
+def init_db():
+    conn = sqlite3.connect('redzone_keys.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS keys
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  hwid TEXT UNIQUE,
+                  key TEXT UNIQUE,
+                  expiry INTEGER,
+                  created_by INTEGER,
+                  created_at INTEGER,
+                  used BOOLEAN DEFAULT 0,
+                  user_id INTEGER DEFAULT 0)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS users
+                 (id INTEGER PRIMARY KEY,
+                  username TEXT,
+                  first_name TEXT,
+                  last_name TEXT,
+                  registered_at INTEGER)''')
+    conn.commit()
+    conn.close()
 
-# ============================================
-# CONFIGURATION
-# ============================================
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '8921411956:AAFJihWjWC1SNDJBiQZj36LmHaRIP8XQ7Ls')
-ADMIN_IDS = [int(id) for id in os.environ.get('ADMIN_IDS', '5130475597').split(',')]
-PRICE = int(os.environ.get('PRICE', '5'))
-KEY_EXPIRY_DAYS = int(os.environ.get('KEY_EXPIRY_DAYS', '1'))
+init_db()
+
+# ========== HASH FUNCTION (Same as Lua) ==========
+def custom_hash(text):
+    """DJB2 Hash - Lua script se match karna chahiye"""
+    hash_val = 5381
+    for char in text:
+        hash_val = (hash_val * 33 + ord(char)) % 4294967296
+    return f"{hash_val:08X}"
+
+def generate_key(hwid, days=30):
+    """Generate key for given HWID"""
+    expiry = int(time.time()) + (days * 86400)
+    raw = f"{hwid}{expiry}{SECRET}"
+    signature = custom_hash(raw)
+    return f"{signature}|{expiry}"
+
+def verify_key(key, hwid):
+    """Verify if key is valid for given HWID"""
+    try:
+        signature, expiry = key.split('|')
+        expiry = int(expiry)
+        
+        # Check expiry
+        if time.time() > expiry:
+            return False, "Key expired!"
+        
+        # Recalculate hash
+        raw = f"{hwid}{expiry}{SECRET}"
+        expected = custom_hash(raw)
+        
+        if signature == expected:
+            return True, "Key valid!"
+        else:
+            return False, "Invalid key for this HWID!"
+    except:
+        return False, "Invalid key format!"
+
+# ========== BOT COMMANDS ==========
+
+# ---- /start ----
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    # Register user
+    conn = sqlite3.connect('redzone_keys.db')
+    c = conn.cursor()
+    c.execute('''INSERT OR IGNORE INTO users (id, username, first_name, last_name, registered_at)
+                 VALUES (?, ?, ?, ?, ?)''',
+              (user.id, user.username, user.first_name, user.last_name, int(time.time())))
+    conn.commit()
+    conn.close()
+    
+    keyboard = [
+        [InlineKeyboardButton("📋 My HWID", callback_data='my_hwid')],
+        [InlineKeyboardButton("🔑 Activate Key", callback_data='activate')],
+        [InlineKeyboardButton("📊 Check Key Status", callback_data='check')],
+    ]
+    
+    if user.id in ADMIN_IDS:
+        keyboard.append([InlineKeyboardButton("⚙️ Admin Panel", callback_data='admin')])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"👋 Welcome {user.first_name}!\n\n"
+        f"🔹 **RedZone License System**\n"
+        f"🔹 Your ID: `{user.id}`\n\n"
+        f"Use the buttons below to manage your license.",
+        reply_markup=reply_markup
+    )
+
+# ---- /hwid - Get HWID ----
+async def get_hwid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    hwid = f"RDZ-{user.id:04X}-{int(time.time()):04X}-{user.id:04X}"
+    
+    # Save HWID
+    conn = sqlite3.connect('redzone_keys.db')
+    c = conn.cursor()
+    c.execute('UPDATE users SET hwid = ? WHERE id = ?', (hwid, user.id))
+    conn.commit()
+    conn.close()
+    
+    keyboard = [[InlineKeyboardButton("🔑 Generate Key", callback_data='genkey')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"🆔 **Your HWID:**\n"
+        f"`{hwid}`\n\n"
+        f"⚠️ Send this HWID to admin to get your key!",
+        reply_markup=reply_markup
+    )
+
+# ---- /genkey (Admin only) ----
+async def genkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    if user.id not in ADMIN_IDS:
+        await update.message.reply_text("❌ You are not authorized!")
+        return
+    
+    try:
+        # Usage: /genkey HWID days
+        args = context.args
+        if len(args) < 1:
+            await update.message.reply_text(
+                "❌ Usage: `/genkey HWID [days]`\n"
+                "Example: `/genkey RDZ-1234-5678-9ABC 30`"
+            )
+            return
+        
+        hwid = args[0]
+        days = int(args[1]) if len(args) > 1 else 30
+        
+        # Generate key
+        key = generate_key(hwid, days)
+        expiry = int(key.split('|')[1])
+        
+        # Save to database
+        conn = sqlite3.connect('redzone_keys.db')
+        c = conn.cursor()
+        c.execute('''INSERT OR REPLACE INTO keys (hwid, key, expiry, created_by, created_at)
+                     VALUES (?, ?, ?, ?, ?)''',
+                  (hwid, key, expiry, user.id, int(time.time())))
+        conn.commit()
+        conn.close()
+        
+        # Show key
+        await update.message.reply_text(
+            f"✅ **Key Generated Successfully!**\n\n"
+            f"🔑 `{key}`\n\n"
+            f"📅 Valid for: {days} days\n"
+            f"📅 Expires: {datetime.fromtimestamp(expiry).strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"🆔 HWID: `{hwid}`\n\n"
+            f"Send this key to the user!"
+        )
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+# ---- /activate (User) ----
+async def activate_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    # Check if user has HWID
+    conn = sqlite3.connect('redzone_keys.db')
+    c = conn.cursor()
+    c.execute('SELECT hwid FROM users WHERE id = ?', (user.id,))
+    result = c.fetchone()
+    
+    if not result or not result[0]:
+        await update.message.reply_text(
+            "❌ You don't have HWID yet!\n"
+            "Use /hwid first."
+        )
+        conn.close()
+        return
+    
+    hwid = result[0]
+    conn.close()
+    
+    # Ask for key
+    context.user_data['awaiting_key'] = True
+    await update.message.reply_text(
+        f"🔑 **Enter your license key:**\n\n"
+        f"Format: `XXXXXXXX|1234567890`\n"
+        f"HWID: `{hwid}`\n\n"
+        f"Type your key here or paste it."
+    )
+
+# ---- Handle key input ----
+async def handle_key_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_key'):
+        return
+    
+    user = update.effective_user
+    key = update.message.text.strip()
+    context.user_data['awaiting_key'] = False
+    
+    # Get user HWID
+    conn = sqlite3.connect('redzone_keys.db')
+    c = conn.cursor()
+    c.execute('SELECT hwid FROM users WHERE id = ?', (user.id,))
+    result = c.fetchone()
+    
+    if not result or not result[0]:
+        await update.message.reply_text("❌ HWID not found! Use /hwid")
+        conn.close()
+        return
+    
+    hwid = result[0]
+    
+    # Verify key
+    valid, msg = verify_key(key, hwid)
+    
+    if valid:
+        # Check if key exists in database
+        c.execute('SELECT * FROM keys WHERE key = ?', (key,))
+        db_result = c.fetchone()
+        
+        if not db_result:
+            await update.message.reply_text("❌ Key not found in database!")
+            conn.close()
+            return
+        
+        # Mark as used
+        c.execute('UPDATE keys SET used = 1, user_id = ? WHERE key = ?', (user.id, key))
+        conn.commit()
+        
+        await update.message.reply_text(
+            f"✅ **Key Activated Successfully!**\n\n"
+            f"🔑 `{key}`\n\n"
+            f"🎮 You can now use RedZone VIP!\n"
+            f"📅 Valid until: {datetime.fromtimestamp(int(key.split('|')[1])).strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+    else:
+        await update.message.reply_text(f"❌ {msg}")
+    
+    conn.close()
+
+# ---- Admin Panel ----
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    if user.id not in ADMIN_IDS:
+        await update.message.reply_text("❌ You are not authorized!")
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("📊 Stats", callback_data='admin_stats')],
+        [InlineKeyboardButton("🔑 Generate Key", callback_data='admin_genkey')],
+        [InlineKeyboardButton("📋 List Keys", callback_data='admin_list')],
+        [InlineKeyboardButton("👥 Users", callback_data='admin_users')],
+        [InlineKeyboardButton("🔙 Back", callback_data='back')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "⚙️ **Admin Panel**\n\n"
+        "Select an option:",
+        reply_markup=reply_markup
+    )
+
+# ---- Button Callbacks ----
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    data = query.data
+    
+    if data == 'my_hwid':
+        conn = sqlite3.connect('redzone_keys.db')
+        c = conn.cursor()
+        c.execute('SELECT hwid FROM users WHERE id = ?', (user.id,))
+        result = c.fetchone()
+        conn.close()
+        
+        if result and result[0]:
+            await query.edit_message_text(
+                f"🆔 **Your HWID:**\n"
+                f"`{result[0]}`\n\n"
+                f"Send this to admin to get your key."
+            )
+        else:
+            await query.edit_message_text(
+                "❌ You don't have HWID yet!\n"
+                "Use /hwid command to generate."
+            )
+    
+    elif data == 'activate':
+        await activate_key(update, context)
+        await query.delete_message()
+    
+    elif data == 'check':
+        conn = sqlite3.connect('redzone_keys.db')
+        c = conn.cursor()
+        c.execute('''SELECT key, expiry, used FROM keys 
+                     WHERE user_id = ? ORDER BY created_at DESC LIMIT 1''', (user.id,))
+        result = c.fetchone()
+        conn.close()
+        
+        if result:
+            key, expiry, used = result
+            status = "✅ Active" if used and time.time() < expiry else "❌ Expired/Inactive"
+            
+            await query.edit_message_text(
+                f"📊 **Key Status**\n\n"
+                f"🔑 Key: `{key}`\n"
+                f"📅 Expiry: {datetime.fromtimestamp(expiry).strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"📌 Status: {status}"
+            )
+        else:
+            await query.edit_message_text(
+                "❌ No key found for your account!"
+            )
+    
+    elif data == 'admin':
+        await admin_panel(update, context)
+        await query.delete_message()
+    
+    elif data == 'back':
+        await start(update, context)
+        await query.delete_message()
+    
+    elif data == 'admin_stats':
+        conn = sqlite3.connect('redzone_keys.db')
+        c = conn.cursor()
+        c.execute('SELECT COUNT(*) FROM keys')
+        total_keys = c.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM keys WHERE used = 1')
+        used_keys = c.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM users')
+        total_users = c.fetchone()[0]
+        conn.close()
+        
+        await query.edit_message_text(
+            f"📊 **Statistics**\n\n"
+            f"👥 Total Users: {total_users}\n"
+            f"🔑 Total Keys: {total_keys}\n"
+            f"✅ Used Keys: {used_keys}\n"
+            f"🔄 Available: {total_keys - used_keys}\n\n"
+            f"📅 Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+    
+    elif data == 'admin_genkey':
+        await query.edit_message_text(
+            "🔑 **Generate Key**\n\n"
+            "Use command:\n"
+            "`/genkey HWID days`\n\n"
+            "Example: `/genkey RDZ-1234-5678-9ABC 30`"
+        )
+    
+    elif data == 'admin_list':
+        conn = sqlite3.connect('redzone_keys.db')
+        c = conn.cursor()
+        c.execute('SELECT hwid, key, expiry, used FROM keys ORDER BY created_at DESC LIMIT 10')
+        results = c.fetchall()
+        conn.close()
+        
+        if results:
+            msg = "📋 **Recent Keys:**\n\n"
+            for hwid, key, expiry, used in results:
+                status = "✅" if used else "⏳"
+                msg += f"{status} HWID: `{hwid[:15]}...`\n"
+                msg += f"   Key: `{key}`\n"
+                msg += f"   Expiry: {datetime.fromtimestamp(expiry).strftime('%Y-%m-%d')}\n\n"
+            
+            await query.edit_message_text(msg)
+        else:
+            await query.edit_message_text("No keys found!")
+
+# ========== MAIN ==========
+def main():
+    # Create application
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Command handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("hwid", get_hwid))
+    app.add_handler(CommandHandler("genkey", genkey))
+    app.add_handler(CommandHandler("activate", activate_key))
+    app.add_handler(CommandHandler("admin", admin_panel))
+    
+    # Message handler for key input
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_key_input))
+    
+    # Callback query handler
+    app.add_handler(CallbackQueryHandler(button_callback))
+    
+    # Start bot
+    print("🤖 Bot started! Press Ctrl+C to stop.")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()KEY_EXPIRY_DAYS = int(os.environ.get('KEY_EXPIRY_DAYS', '1'))
 API_PORT = int(os.environ.get('PORT', '5000'))
 SECRET_KEY = os.environ.get('SECRET_KEY', 'RedZone_Ultra_Secure_2026_@ZAKPUBGSKIN')
 
