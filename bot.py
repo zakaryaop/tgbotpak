@@ -12,7 +12,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 # CONFIGURATION - ENVIRONMENT VARIABLES
 # ==========================================
 TOKEN = os.environ.get("8603563956:AAG6O02ZTMVNqDM9u-Mrc3EkwYqgR-_rHNw", "")
-ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_IDS", "5130475597,5130475597").split(",") if id.strip()]
+ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_IDS", "5130475597").split(",") if id.strip()]
 
 # Database file
 DB_FILE = "licenses.json"
@@ -168,7 +168,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         data = query.data
         
-        # BUY KEY
         if data == "buy_key":
             keyboard = [
                 [InlineKeyboardButton(f"🟢 1 Day - ${PRICES['1']}", callback_data="buy_1")],
@@ -224,7 +223,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             context.user_data['waiting_for'] = 'screenshot'
             
-        # PAK FILES
         elif data == "pak_files":
             features_text = "🔥 ESP: Skeleton, Box, Distance, Health, Radar, Antenna, Outline\n🔥 Aimbot: Auto Headshot, Magic Bullet, No Recoil\n🔥 Visual: 165 FPS, IPAD View, Remove Grass/Fog, White Body, Black Sky, Wallhack\n🔥 Other: God Mode, Wall Climb, Fast Car"
             
@@ -236,7 +234,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ])
             )
             
-        # REFERRAL
         elif data == "referral":
             db = load_db()
             user_data = db["users"].get(str(user_id), {})
@@ -251,7 +248,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ])
             )
             
-        # ADMIN PANEL
         elif data == "admin_dashboard":
             if user_id not in ADMIN_IDS:
                 await query.edit_message_text("⛔ Not authorized!")
@@ -296,7 +292,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             db = load_db()
             pending = db.get("pending_payments", {})
-            
             pending_list = [p for p in pending.values() if p.get("status") == "pending"]
             
             if not pending_list:
@@ -385,7 +380,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ])
             )
             
-        # APPROVE/REJECT PAYMENTS
         elif data.startswith("approve_payment_"):
             if user_id not in ADMIN_IDS:
                 await query.edit_message_text("⛔ Not authorized!")
@@ -486,7 +480,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         db = load_db()
         
-        # Screenshot
         if context.user_data.get('waiting_for') == 'screenshot':
             if update.message.photo:
                 photo = update.message.photo[-1]
@@ -548,7 +541,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ Send a photo/screenshot!")
                 return
         
-        # Referral
         message_text = update.message.text or ""
         if message_text.startswith("REF") or message_text.startswith("ref"):
             ref_code = message_text.upper()
@@ -604,7 +596,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             return
         
-        # Admin commands
         waiting_for = context.user_data.get('waiting_for', '')
         
         if waiting_for == 'admin_gen_license':
@@ -733,6 +724,11 @@ def main():
     if not TOKEN:
         print("⚠️ ERROR: BOT_TOKEN environment variable not set!")
         print("Please set BOT_TOKEN in Railway environment variables.")
+        print("\nHow to fix:")
+        print("1. Go to Railway Dashboard")
+        print("2. Select your project")
+        print("3. Click 'Variables' tab")
+        print("4. Add BOT_TOKEN = your_bot_token")
         sys.exit(1)
     
     try:
