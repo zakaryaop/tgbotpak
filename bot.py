@@ -31,10 +31,10 @@ except ImportError:
 # ============================================
 # CONFIGURATION
 # ============================================
-BOT_TOKEN = os.environ.get('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
-ADMIN_IDS = [int(id) for id in os.environ.get('ADMIN_IDS', '123456789').split(',')]
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '8921411956:AAFJihWjWC1SNDJBiQZj36LmHaRIP8XQ7Ls')
+ADMIN_IDS = [int(id) for id in os.environ.get('ADMIN_IDS', '5130475597').split(',')]
 PRICE = int(os.environ.get('PRICE', '5'))
-KEY_EXPIRY_DAYS = int(os.environ.get('KEY_EXPIRY_DAYS', '30'))
+KEY_EXPIRY_DAYS = int(os.environ.get('KEY_EXPIRY_DAYS', '1'))
 API_PORT = int(os.environ.get('PORT', '5000'))
 SECRET_KEY = os.environ.get('SECRET_KEY', 'RedZone_Ultra_Secure_2026_@ZAKPUBGSKIN')
 
